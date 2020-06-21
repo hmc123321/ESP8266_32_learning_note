@@ -12,7 +12,7 @@ IPAddress gateway(192,168,4,9);
 IPAddress subnet(255,255,255,0);
  
 void setup(){
-  //设置串口波特率，以便打印信息
+  //设置串口波特率
   DebugBegin(115200);
   //延时2s 为了演示效果
   delay(2000);
