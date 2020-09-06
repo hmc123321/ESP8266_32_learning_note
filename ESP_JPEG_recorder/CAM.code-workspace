@@ -1,0 +1,18 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "..\\ESP32 Learning\\esp32-camera-master\\esp32-camera-master"
+		},
+		{
+			"path": "..\\..\\Documents\\Arduino\\hardware\\espressif\\esp32\\tools\\sdk\\include\\freertos\\freertos"
+		}
+	],
+	"settings": {
+		"files.associations": {
+			"*.tcc": "cpp"
+		}
+	}
+}
