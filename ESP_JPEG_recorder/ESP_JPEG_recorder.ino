@@ -40,6 +40,8 @@ TaskHandle_t savingHandle = NULL;
 /* RingbufHandle_t buf_handle; */
 /* 照片结构信号量 */
 SemaphoreHandle_t PicMutex;
+/* 全局变量信号量 */
+SemaphoreHandle_t stateMutex;
 /* 帧同步队列 */
 QueueHandle_t FrameQueue;
 
@@ -72,8 +74,15 @@ void setup (){
     FrameQueue=xQueueCreate(1,1);
     /* 创建1互斥量 */
     PicMutex= xSemaphoreCreateMutex();
+    /* 创建2互斥量 */
+    stateMutex= xSemaphoreCreateMutex();
     /* 创建环形缓冲区，jpeg大小不固定 */
-/*     buf_handle = xRingbufferCreate(4096*8, RINGBUF_TYPE_NOSPLIT); */
+    /* buf_handle = xRingbufferCreate(4096*8, RINGBUF_TYPE_NOSPLIT); */
+    /* 初始化SD卡 */
+    SD_MMC_Init();
+    Serial.printf("SD_MMC is Initialized.\n");
+    CAM_Init();/* 开启相机 */
+    Serial.printf("Camera is Initialized.\n");
     /* 分双核处理 */
     xTaskCreatePinnedToCore(take_photo,
                             "take photo",
@@ -132,16 +141,19 @@ void CAM_Init()
         config.jpeg_quality = 12;
         config.fb_count = 3;
     }
+
+    Serial.printf("Initializing Camera.\n");
      // Init Camera
     esp_err_t err = esp_camera_init(&config);
     if (err != ESP_OK) {
-        Serial.printf("Camera init failed with error 0x%x", err);
+        Serial.printf("Camera init failed with error 0x%x\n", err);
         return;
     }
 }
 
 void SD_MMC_Init()
 {
+    Serial.printf("Initializing SD_card.");
     if(!SD_MMC.begin())
     {
         Serial.println("Card Mount Failed");
@@ -151,7 +163,7 @@ void SD_MMC_Init()
 
     if(cardType == CARD_NONE)
     {
-        Serial.println("No SD_MMC card attached");
+        Serial.println("No SD_MMC card attached\n");
         return;
     }
 
@@ -185,11 +197,11 @@ void take_photo (void *pvParameters){
     pinMode(START_GPIO,INPUT_PULLUP);
     pinMode(LED_GPIO,OUTPUT);//红色LED作为录像指示,低电平有效
     digitalWrite(LED_GPIO,1);//默认关闭
-
-    CAM_Init();/* 开启相机 */
-
+    Serial.printf("Take photo task is created\n");
+    
     while(1)
     {
+        Serial.printf("Scaning key.\n");
         if (digitalRead(START_GPIO)==0)//按下按钮后，消抖20ms
         {
             vTaskDelay(20/portTICK_RATE_MS);
@@ -200,27 +212,39 @@ void take_photo (void *pvParameters){
                 digitalWrite(LED_GPIO,getStatus);
                 /* 反转标志 */
                 getStatus=(~getStatus)&0x01;
+                xSemaphoreTake(stateMutex,portMAX_DELAY);
                 isRecording=getStatus;
+                xSemaphoreGive(stateMutex);
                 /* 按下按钮才开始计时 */
                 xLastWakeTime = xTaskGetTickCount();
             }
         }
+        /* 若没有启动，20ms扫描一次按键 */
+        else if (getStatus==0)
+        {
+            vTaskDelay(20/portTICK_RATE_MS);
+        }
 
         if (getStatus==1){//若录像标置为1，开始持续录制
+            Serial.printf("Begin recording...\n");
+            /* 延时阻塞 */ 
+            vTaskDelayUntil( &xLastWakeTime, ( (1000/frameRate) / portTICK_RATE_MS ) );
             /* 帧队列置1，若队列满，说明上一帧没有存完，阻塞等待 */
             xQueueSendToFront(FrameQueue, &getFrame,portMAX_DELAY);
+            Serial.printf("Fill Queue\n");
             /* 获取信号量，防止读图片 */
             xSemaphoreTake(PicMutex,portMAX_DELAY);
+            Serial.printf("taking got the Mutex\n");
             /* 拍照 */
             last_time=micros();
             fb = esp_camera_fb_get();
             /* 写入完成释放 */
             xSemaphoreGive(PicMutex);
-            Serial.printf("take %u us to record",micros()-last_time);
+            Serial.printf("take %u us to write\n",micros()-last_time);
             /* 判断是否录制成功 */
             if(!fb) 
             {
-                Serial.printf("Fail to take photo");
+                Serial.printf("Fail to take photo\n");
                 return;
             }
             /* 若成功，写入环形缓冲区 */
@@ -234,16 +258,16 @@ void take_photo (void *pvParameters){
             } */
             /* 释放缓存 */
             esp_camera_fb_return(fb);
-            /* 阻塞 */ 
-            vTaskDelayUntil( &xLastWakeTime, ( (1000/frameRate) / portTICK_RATE_MS ) );
+            
         }
     }
     vTaskDelete(NULL);
 }
 
-uint8_t * processPicName(uint32_t picNumber){
-    uint8_t path[20]="/pic";
-    const uint8_t picEnd[]=".jpg";
+void processPicName(char *path,uint32_t picNumber){
+    Serial.printf("processing path\n");
+    memcpy (path,"/pic",4);
+    const char picEnd[]=".jpg";
     /* 字符串长度从pic后面开始 */
     uint8_t m=4;
     /* 录制24小时最多7位数 */
@@ -260,7 +284,6 @@ uint8_t * processPicName(uint32_t picNumber){
     m+=4;
     /* 结尾补0 */
     path[m]=0;
-    return path;
 }
 
 
@@ -273,37 +296,43 @@ void save_photo(void *pvParameters)
     char path[20];
     uint8_t getStatus=0,getFrame=0;
     uint32_t last_time;
-
     /* 环形缓冲区的读指针 */
     /* uint8_t *ringBufferData; */
     /* 缓冲区长度变量 */
     /* size_t item_size; */
-    /* 初始化SD卡 */
-    SD_MMC_Init();
+    Serial.printf("saving task is created\n");
+    
     while(1)
     {
-        if (isRecording==1)
+        Serial.printf("waiting key\n");
+        xSemaphoreTake(stateMutex,portMAX_DELAY);
+        getStatus=isRecording;
+        xSemaphoreGive(stateMutex);
+        if (getStatus==1)
         {
-            memcpy(path,(char *)processPicName(pictureNumber),20);
+            Serial.printf("ready to save...\n");
+            processPicName(path,pictureNumber);
             /*指针指向环形缓冲区 */
             /* ringBufferData=(uint8_t*)xRingbufferReceive(buf_handle, &item_size, pdMS_TO_TICKS(100)); */
             /* 新建文件 */
             file = SD_MMC.open(path, FILE_WRITE);
             if(!file)
             {
-                Serial.println("Failed to open file in writing mode");
+                Serial.println("Failed to open file in writing mode\n");
             }
             else 
             {   
+                Serial.printf("Saving pic name:%s\n",path);
                 /* 队列为空时阻塞等待 */
                 xQueueReceive(FrameQueue,&getFrame,portMAX_DELAY);
                 /* 队列有数据了，说明已写入一帧 */
+                Serial.printf("Recived from queue\n");
                 /* 利用互斥量等待拍照完成 */
                 xSemaphoreTake(PicMutex,portMAX_DELAY);
                 last_time=micros();
                 file.write(fb->buf, fb->len);
                 xSemaphoreGive(PicMutex);
-                Serial.printf("take %u us to save",micros()-last_time);
+                Serial.printf("take %u us to save\n",micros()-last_time);
                 /* if (ringBufferData != NULL) {
                 for (int i = 0; i < item_size; i++) {
                     file.write(ringBufferData[i]);

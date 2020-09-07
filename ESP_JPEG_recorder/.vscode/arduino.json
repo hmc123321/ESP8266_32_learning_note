@@ -1,0 +1,5 @@
+{
+    "board": "espressif:esp32:esp32cam",
+    "port": "COM15",
+    "sketch": "ESP_JPEG_recorder.ino"
+}
